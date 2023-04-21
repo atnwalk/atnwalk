@@ -813,99 +813,86 @@ func (w *ATNWalker) exceededDeadline() bool {
 	return w.deadlineIsSet && time.Now().After(w.deadline)
 }
 
-func (w *ATNWalker) Repair(data []byte) []byte {
-	// TODO: this is just a big code clone compared to the Decode function, keep it for the moment as technical debt...
-	// requires refactoring later
-	writeBack := &([]byte{})
-	decoder := NewDecoder(data,
-		len(w.Parser.GetATN().GetRuleIndexToStartStateSlice()),
-		len(w.Lexer.GetATN().GetRuleIndexToStartStateSlice()), writeBack)
-	nextNodesStack := &Stack[TreeNode]{}
-	root := NewRuleNode(nil, w.Parser.GetATN().GetRuleIndexToStartStateSlice()[0])
+func (w *ATNWalker) AssembleTree(decoder *Decoder, root *RuleNode, stack *Stack[TreeNode]) bool {
 	var node TreeNode
 	var children []TreeNode
-
-	// process parser rules (depth first)
-	nextNodesStack.Push(root)
-	for !nextNodesStack.IsEmpty() {
+	stack = &Stack[TreeNode]{}
+	stack.Push(root)
+	for !stack.IsEmpty() {
 		if w.exceededDeadline() {
-			writeBack = nil
-			return []byte{}
+			return false
 		}
-		node = nextNodesStack.Pop()
+		node = stack.Pop()
 		switch n := node.(type) {
 		case *RuleNode:
 			w.decodeParserRuleATN(decoder, n)
 			children = n.Children
 			for i := len(children) - 1; i >= 0; i-- {
-				nextNodesStack.Push(children[i])
+				stack.Push(children[i])
 			}
 		case *SymbolNode:
 			w.decodeLexerSymbolATN(decoder, n)
 			children = n.GetChildren()
 			for i := len(children) - 1; i >= 0; i-- {
-				nextNodesStack.Push(children[i])
+				stack.Push(children[i])
 			}
 		}
 	}
-	return *writeBack
+	return true
 }
 
-func (w *ATNWalker) Decode(data []byte, writeBack *[]byte) string {
-	decoder := NewDecoder(data,
-		len(w.Parser.GetATN().GetRuleIndexToStartStateSlice()),
-		len(w.Lexer.GetATN().GetRuleIndexToStartStateSlice()), writeBack)
-	nextNodesStack := &Stack[TreeNode]{}
-	root := NewRuleNode(nil, w.Parser.GetATN().GetRuleIndexToStartStateSlice()[0])
+func (w *ATNWalker) TreeToString(root *RuleNode, stack *Stack[TreeNode]) string {
+	// assemble the string with the parse tree (depth first)
+	builder := strings.Builder{}
 	var node TreeNode
 	var children []TreeNode
-
-	// process parser rules (depth first)
-	nextNodesStack.Push(root)
-	for !nextNodesStack.IsEmpty() {
+	stack.Push(root)
+	for !stack.IsEmpty() {
 		if w.exceededDeadline() {
-			writeBack = nil
 			return ""
 		}
-		node = nextNodesStack.Pop()
-		switch n := node.(type) {
-		case *RuleNode:
-			w.decodeParserRuleATN(decoder, n)
-			children = n.Children
-			for i := len(children) - 1; i >= 0; i-- {
-				nextNodesStack.Push(children[i])
-			}
-		case *SymbolNode:
-			w.decodeLexerSymbolATN(decoder, n)
-			children = n.GetChildren()
-			for i := len(children) - 1; i >= 0; i-- {
-				nextNodesStack.Push(children[i])
-			}
-		}
-	}
-
-	// eventually, assemble the string with the parse tree (depth first)
-	builder := strings.Builder{}
-	nextNodesStack.Push(root)
-	for !nextNodesStack.IsEmpty() {
-		if w.exceededDeadline() {
-			writeBack = nil
-			return ""
-		}
-		node = nextNodesStack.Pop()
+		node = stack.Pop()
 		children = node.GetChildren()
 		for i := len(children) - 1; i >= 0; i-- {
-			nextNodesStack.Push(children[i])
+			stack.Push(children[i])
 		}
 		switch n := node.(type) {
 		case *LiteralNode:
 			builder.WriteRune(n.Text)
 		}
 	}
+	return builder.String()
+}
+
+func (w *ATNWalker) Repair(data []byte) []byte {
+	writeBack := &([]byte{})
+	decoder := NewDecoder(data,
+		len(w.Parser.GetATN().GetRuleIndexToStartStateSlice()),
+		len(w.Lexer.GetATN().GetRuleIndexToStartStateSlice()), writeBack)
+	stack := &Stack[TreeNode]{}
+	root := NewRuleNode(nil, w.Parser.GetATN().GetRuleIndexToStartStateSlice()[0])
+	if !w.AssembleTree(decoder, root, stack) {
+		writeBack = nil
+		return []byte{}
+	}
+
+	return decoder.writeBackEncoder.Bytes()
+}
+
+func (w *ATNWalker) Decode(data []byte, writeBack *[]byte) string {
+	decoder := NewDecoder(data,
+		len(w.Parser.GetATN().GetRuleIndexToStartStateSlice()),
+		len(w.Lexer.GetATN().GetRuleIndexToStartStateSlice()), writeBack)
+	stack := &Stack[TreeNode]{}
+	root := NewRuleNode(nil, w.Parser.GetATN().GetRuleIndexToStartStateSlice()[0])
+	if !w.AssembleTree(decoder, root, stack) {
+		writeBack = nil
+		return ""
+	}
 
 	if writeBack != nil {
 		*writeBack = decoder.writeBackEncoder.Bytes()
 	}
 
-	return builder.String()
+	return w.TreeToString(root, stack)
 }
